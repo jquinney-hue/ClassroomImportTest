@@ -781,14 +781,29 @@
 
     async function apiRequest(url, options = {}) {
       await ensureToken();
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${state.accessToken}`,
-          ...(options.body ? { "Content-Type": "application/json" } : {}),
-          ...(options.headers || {})
+      const { timeoutMs = 45000, headers = {}, ...fetchOptions } = options;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      let response;
+
+      try {
+        response = await fetch(url, {
+          ...fetchOptions,
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${state.accessToken}`,
+            ...(fetchOptions.body ? { "Content-Type": "application/json" } : {}),
+            ...headers
+          }
+        });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new Error("Google API request timed out. Check that this account can access the code spreadsheet.");
         }
-      });
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
 
       if (response.status === 401) {
         state.accessToken = "";
@@ -1183,7 +1198,9 @@
         majorDimension: "ROWS"
       });
       ranges.forEach((range) => params.append("ranges", range));
-      const body = await apiRequest(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${params.toString()}`);
+      const body = await apiRequest(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${params.toString()}`, {
+        timeoutMs: 20000
+      });
       return body.valueRanges || [];
     }
 
@@ -1265,20 +1282,27 @@
       const metadata = await getSpreadsheetMetadata(spreadsheetId);
       const targetEmail = email.toLowerCase();
       const titles = (metadata.sheets || []).map((sheet) => sheet.properties.title);
-      const ranges = titles.map((title) => `${quoteSheetName(title)}!A2:D`);
-      const valueRanges = await batchReadSheetValues(spreadsheetId, ranges);
+      if (!titles.length) return null;
 
-      for (const [index, valueRange] of valueRanges.entries()) {
-        const title = titles[index] || "Class";
-        const values = valueRange.values || [];
-        for (const row of values) {
-          if ((row[0] || "").toLowerCase() === targetEmail) {
-            return {
-              className: title,
-              firstName: row[1] || "",
-              lastName: row[2] || "",
-              code: row[3] || ""
-            };
+      const batchSize = 10;
+      for (let start = 0; start < titles.length; start += batchSize) {
+        const titleBatch = titles.slice(start, start + batchSize);
+        const ranges = titleBatch.map((title) => `${quoteSheetName(title)}!A2:D`);
+        setMessage(`Searching class tabs ${start + 1}-${Math.min(start + batchSize, titles.length)} of ${titles.length}...`);
+        const valueRanges = await batchReadSheetValues(spreadsheetId, ranges);
+
+        for (const [index, valueRange] of valueRanges.entries()) {
+          const title = titleBatch[index] || "Class";
+          const values = valueRange.values || [];
+          for (const row of values) {
+            if ((row[0] || "").toLowerCase() === targetEmail) {
+              return {
+                className: title,
+                firstName: row[1] || "",
+                lastName: row[2] || "",
+                code: row[3] || ""
+              };
+            }
           }
         }
       }
