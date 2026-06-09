@@ -567,12 +567,13 @@
     const FIREBASE_CONFIG = {
       apiKey: "AIzaSyDxQWY8nDSwIjnzOmRrZtlkHhqW8K8CH4Y",
       authDomain: "usertest-88117.firebaseapp.com",
-      databaseURL: "https://usertest-88117-default-rtdb.firebaseio.com",
+      databaseURL: "https://usertest-88117-default-rtdb.europe-west1.firebasedatabase.app",
       projectId: "usertest-88117",
       storageBucket: "usertest-88117.firebasestorage.app",
       messagingSenderId: "90182969392",
       appId: "1:90182969392:web:525ed400cc2b21c21925f5"
     };
+    const DATABASE_URL = "https://usertest-88117-default-rtdb.europe-west1.firebasedatabase.app";
     const CODE_HEADERS = ["Email Address", "First Name", "Last Name", "Code"];
     const SCOPES = [
       "https://www.googleapis.com/auth/userinfo.email",
@@ -673,7 +674,7 @@
       try {
         state.firebaseApp = getApps()[0] || initializeApp(FIREBASE_CONFIG);
         state.firebaseAuth = getAuth(state.firebaseApp);
-        state.database = getDatabase(state.firebaseApp);
+        state.database = getDatabase(state.firebaseApp, DATABASE_URL);
       } catch (error) {
         state.firebaseApp = null;
         state.firebaseAuth = null;
@@ -1274,14 +1275,7 @@
         );
         state.firebaseUser = credential.user;
         setMessage("Anonymous Firebase login complete. Saving code...");
-        await withTimeout(
-          set(ref(state.database, `studentCodes/${credential.user.uid}`), {
-            code: match.code,
-            updatedAt: serverTimestamp()
-          }),
-          12000,
-          "Realtime Database write timed out. Check the database URL and Realtime Database rules."
-        );
+        await saveCodeToRealtimeDatabase(credential.user.uid, match.code);
 
         renderStudentResult(match, credential.user.uid);
         setMessage("Anonymous Firebase login complete. Only the random code was written to Realtime Database.", "success");
@@ -1290,6 +1284,18 @@
       } finally {
         setBusy(false);
       }
+    }
+
+    async function saveCodeToRealtimeDatabase(firebaseUid, code) {
+      setMessage(`Saving code to Realtime Database (${DATABASE_URL})...`);
+      await withTimeout(
+        set(ref(state.database, `studentCodes/${firebaseUid}`), {
+          code,
+          updatedAt: serverTimestamp()
+        }),
+        12000,
+        `Timed out connecting to ${DATABASE_URL}`
+      );
     }
 
     async function findStudentCode(spreadsheetId, email) {
