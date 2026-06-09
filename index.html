@@ -560,6 +560,7 @@
     import { getDatabase, ref, set, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
 
     const DEFAULT_CLIENT_ID = "116392131413-3614tl9le1a82crqskhqr95ar9rvddmb.apps.googleusercontent.com";
+    // Folder that contains, or will contain, the generated class-code spreadsheet.
     const CODE_FOLDER_ID = "1KElCPt_0bCQTEQHaL0Dy9mPxcuuxRmSj";
     const DEFAULT_SPREADSHEET_NAME = "Classroom Student Codes";
     const FIREBASE_CONFIG = {
@@ -640,7 +641,7 @@
       courses: [],
       selectedCourseIds: new Set(),
       rostersByCourseId: new Map(),
-      spreadsheetId: localStorage.getItem("classroomCodeSpreadsheetId") || "",
+      spreadsheetId: "",
       firebaseApp: null,
       firebaseAuth: null,
       database: null,
@@ -661,7 +662,6 @@
       localStorage.setItem("classroomCodeClientId", els.clientId.value.trim() || DEFAULT_CLIENT_ID);
       localStorage.setItem("classroomCodeSpreadsheetName", els.spreadsheetName.value.trim() || DEFAULT_SPREADSHEET_NAME);
       state.spreadsheetId = "";
-      localStorage.removeItem("classroomCodeSpreadsheetId");
       initTokenClient();
       setMessage("Settings saved. Sign in with Google when ready.", "success");
       updateUi();
@@ -986,7 +986,6 @@
         const spreadsheet = await findCodeSpreadsheet();
         if (!spreadsheet) return result;
         state.spreadsheetId = spreadsheet.id;
-        localStorage.setItem("classroomCodeSpreadsheetId", spreadsheet.id);
         const metadata = await getSpreadsheetMetadata(spreadsheet.id);
         for (const sheet of metadata.sheets || []) {
           const title = sheet.properties.title;
@@ -1064,7 +1063,6 @@
       const existing = await findCodeSpreadsheet();
       if (existing) {
         state.spreadsheetId = existing.id;
-        localStorage.setItem("classroomCodeSpreadsheetId", existing.id);
         return existing;
       }
 
@@ -1074,7 +1072,6 @@
         body: JSON.stringify({ properties: { title: name } })
       });
       state.spreadsheetId = created.spreadsheetId;
-      localStorage.setItem("classroomCodeSpreadsheetId", created.spreadsheetId);
 
       const file = await apiRequest(`https://www.googleapis.com/drive/v3/files/${created.spreadsheetId}?fields=parents`);
       const previousParents = (file.parents || []).join(",");
@@ -1092,10 +1089,6 @@
     }
 
     async function findCodeSpreadsheet() {
-      if (state.spreadsheetId) {
-        return { id: state.spreadsheetId, name: els.spreadsheetName.value.trim() || DEFAULT_SPREADSHEET_NAME };
-      }
-
       const name = els.spreadsheetName.value.trim() || DEFAULT_SPREADSHEET_NAME;
       const escapedName = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
       const query = [
@@ -1115,7 +1108,6 @@
       const file = (result.files || [])[0] || null;
       if (file) {
         state.spreadsheetId = file.id;
-        localStorage.setItem("classroomCodeSpreadsheetId", file.id);
       }
       return file;
     }
