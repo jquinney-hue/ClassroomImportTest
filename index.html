@@ -783,11 +783,11 @@
       await ensureToken();
       const { timeoutMs = 45000, headers = {}, ...fetchOptions } = options;
       const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      let timeoutId;
       let response;
 
       try {
-        response = await fetch(url, {
+        const fetchPromise = fetch(url, {
           ...fetchOptions,
           signal: controller.signal,
           headers: {
@@ -796,6 +796,13 @@
             ...headers
           }
         });
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            controller.abort();
+            reject(new Error("Google API request timed out. Check that this account can access the code spreadsheet."));
+          }, timeoutMs);
+        });
+        response = await Promise.race([fetchPromise, timeoutPromise]);
       } catch (error) {
         if (error.name === "AbortError") {
           throw new Error("Google API request timed out. Check that this account can access the code spreadsheet.");
@@ -1274,9 +1281,15 @@
 
       for (const [index, title] of titles.entries()) {
         setMessage(`Searching "${title}" (${index + 1} of ${titles.length})...`);
-        const values = await readSheetValues(spreadsheetId, `${quoteSheetName(title)}!A2:D500`, {
-          timeoutMs: 8000
-        });
+        let values;
+        try {
+          values = await readSheetValues(spreadsheetId, `${quoteSheetName(title)}!A2:D500`, {
+            timeoutMs: 8000
+          });
+        } catch (error) {
+          throw new Error(`Could not read "${title}": ${error.message}`);
+        }
+        setMessage(`Read ${values.length} row${values.length === 1 ? "" : "s"} from "${title}". Checking email...`);
         for (const row of values) {
           if ((row[0] || "").toLowerCase() === targetEmail) {
             return {
