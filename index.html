@@ -1177,6 +1177,16 @@
       return body.values || [];
     }
 
+    async function batchReadSheetValues(spreadsheetId, ranges) {
+      if (!ranges.length) return [];
+      const params = new URLSearchParams({
+        majorDimension: "ROWS"
+      });
+      ranges.forEach((range) => params.append("ranges", range));
+      const body = await apiRequest(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${params.toString()}`);
+      return body.valueRanges || [];
+    }
+
     async function deleteDefaultSheetIfEmpty(spreadsheetId) {
       const metadata = await getSpreadsheetMetadata(spreadsheetId);
       const defaultSheet = (metadata.sheets || []).find((sheet) => sheet.properties.title === "Sheet1");
@@ -1228,9 +1238,10 @@
 
       setBusy(true);
       try {
-        setMessage("Looking up student code in Google Sheets...");
+        setMessage("Finding the code spreadsheet...");
         const spreadsheet = await findCodeSpreadsheet();
-        if (!spreadsheet) throw new Error("Could not find the code spreadsheet in the configured folder.");
+        if (!spreadsheet) throw new Error("Could not find the code spreadsheet in the configured folder. The student may not have access to that Drive folder or spreadsheet.");
+        setMessage("Searching class tabs for your student code...");
         const match = await findStudentCode(spreadsheet.id, state.account.email);
         if (!match) throw new Error("No matching student row found for the signed-in Google email.");
 
@@ -1253,9 +1264,13 @@
     async function findStudentCode(spreadsheetId, email) {
       const metadata = await getSpreadsheetMetadata(spreadsheetId);
       const targetEmail = email.toLowerCase();
-      for (const sheet of metadata.sheets || []) {
-        const title = sheet.properties.title;
-        const values = await readSheetValues(spreadsheetId, `${quoteSheetName(title)}!A2:D`);
+      const titles = (metadata.sheets || []).map((sheet) => sheet.properties.title);
+      const ranges = titles.map((title) => `${quoteSheetName(title)}!A2:D`);
+      const valueRanges = await batchReadSheetValues(spreadsheetId, ranges);
+
+      for (const [index, valueRange] of valueRanges.entries()) {
+        const title = titles[index] || "Class";
+        const values = valueRange.values || [];
         for (const row of values) {
           if ((row[0] || "").toLowerCase() === targetEmail) {
             return {
