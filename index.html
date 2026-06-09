@@ -557,8 +557,7 @@
 
   <script type="module">
     import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
-    import { getAuth, signInAnonymously, signOut as firebaseSignOut } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
-    import { getDatabase, ref, set, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+    import { getAuth, getIdToken, signInAnonymously, signOut as firebaseSignOut } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 
     const DEFAULT_CLIENT_ID = "116392131413-3614tl9le1a82crqskhqr95ar9rvddmb.apps.googleusercontent.com";
     // Folder that contains, or will contain, the generated class-code spreadsheet.
@@ -647,7 +646,6 @@
       spreadsheetId: "",
       firebaseApp: null,
       firebaseAuth: null,
-      database: null,
       firebaseUser: null,
       busy: false
     };
@@ -674,11 +672,9 @@
       try {
         state.firebaseApp = getApps()[0] || initializeApp(FIREBASE_CONFIG);
         state.firebaseAuth = getAuth(state.firebaseApp);
-        state.database = getDatabase(state.firebaseApp, DATABASE_URL);
       } catch (error) {
         state.firebaseApp = null;
         state.firebaseAuth = null;
-        state.database = null;
         setMessage(`Firebase could not initialize: ${error.message}`, "error");
       }
     }
@@ -1252,7 +1248,7 @@
         setMessage("Sign in with Google first so the student email can be checked.", "warning");
         return;
       }
-      if (!state.firebaseAuth || !state.database) {
+      if (!state.firebaseAuth) {
         setMessage("Firebase is not ready yet.", "warning");
         return;
       }
@@ -1275,7 +1271,7 @@
         );
         state.firebaseUser = credential.user;
         setMessage("Anonymous Firebase login complete. Saving code...");
-        await saveCodeToRealtimeDatabase(credential.user.uid, match.code);
+        await saveCodeToRealtimeDatabase(credential.user, match.code);
 
         renderStudentResult(match, credential.user.uid);
         setMessage("Anonymous Firebase login complete. Only the random code was written to Realtime Database.", "success");
@@ -1286,16 +1282,33 @@
       }
     }
 
-    async function saveCodeToRealtimeDatabase(firebaseUid, code) {
+    async function saveCodeToRealtimeDatabase(firebaseUser, code) {
       setMessage(`Saving code to Realtime Database (${DATABASE_URL})...`);
-      await withTimeout(
-        set(ref(state.database, `studentCodes/${firebaseUid}`), {
-          code,
-          updatedAt: serverTimestamp()
+      const idToken = await withTimeout(
+        getIdToken(firebaseUser, true),
+        12000,
+        "Could not get an anonymous Firebase ID token."
+      );
+      const response = await withTimeout(
+        fetch(`${DATABASE_URL}/studentCodes/${encodeURIComponent(firebaseUser.uid)}.json?auth=${encodeURIComponent(idToken)}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            code,
+            updatedAt: Date.now()
+          })
         }),
         12000,
         `Timed out connecting to ${DATABASE_URL}`
       );
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = body && body.error ? body.error : response.statusText;
+        throw new Error(`Realtime Database rejected the write: ${error}`);
+      }
     }
 
     async function findStudentCode(spreadsheetId, email) {
