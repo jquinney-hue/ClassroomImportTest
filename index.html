@@ -500,6 +500,7 @@
             <div class="button-row">
               <button id="loadClasses" disabled>Load classes</button>
               <button id="importSelected" class="secondary" disabled>Import selected classlists</button>
+              <button id="unloadImported" class="secondary" disabled>Unload imported</button>
               <button id="writeSheets" class="secondary" disabled>Write codes to Sheets</button>
             </div>
             <p class="hint">Teacher scopes include Classroom rosters, profile emails, Sheets, and Drive access for creating the spreadsheet in the code folder.</p>
@@ -616,6 +617,7 @@
       signOut: document.getElementById("signOut"),
       loadClasses: document.getElementById("loadClasses"),
       importSelected: document.getElementById("importSelected"),
+      unloadImported: document.getElementById("unloadImported"),
       writeSheets: document.getElementById("writeSheets"),
       studentLookup: document.getElementById("studentLookup"),
       message: document.getElementById("message"),
@@ -704,6 +706,7 @@
       els.signOut.disabled = state.busy || (!state.accessToken && !state.firebaseUser);
       els.loadClasses.disabled = state.busy || !signedIn || state.mode !== "teacher";
       els.importSelected.disabled = state.busy || !signedIn || state.mode !== "teacher" || state.selectedCourseIds.size === 0;
+      els.unloadImported.disabled = state.busy || state.mode !== "teacher" || state.rostersByCourseId.size === 0;
       els.writeSheets.disabled = state.busy || !signedIn || state.mode !== "teacher" || state.rostersByCourseId.size === 0;
       els.studentLookup.disabled = state.busy || !signedIn || state.mode !== "student";
       els.selectAllClasses.disabled = state.busy || state.courses.length === 0 || state.mode !== "teacher";
@@ -921,12 +924,32 @@
           state.rostersByCourseId.set(course.id, roster);
           renderRosters();
         }
-        setMessage("Selected classlists imported and random codes generated.", "success");
+        setMessage("Selected classlists imported. Existing codes were preserved and new students received codes.", "success");
       } catch (error) {
         setMessage(`Could not import classlists: ${error.message}`, "error");
       } finally {
         setBusy(false);
       }
+    }
+
+    function unloadImportedClasslists() {
+      if (!state.rostersByCourseId.size) {
+        setMessage("No imported classlists to unload.", "warning");
+        return;
+      }
+
+      state.rostersByCourseId.clear();
+      renderRosters();
+      setMessage("All imported classlists unloaded. No classes are queued for writing to Sheets.", "success");
+      updateUi();
+    }
+
+    function unloadImportedClasslist(courseId) {
+      const course = state.courses.find((item) => item.id === courseId) || { name: courseId };
+      if (!state.rostersByCourseId.delete(courseId)) return;
+      renderRosters();
+      setMessage(`Unloaded ${course.name || courseId}. It will not be written to Sheets unless imported again.`, "success");
+      updateUi();
     }
 
     function normalizeStudent(student) {
@@ -1007,14 +1030,15 @@
       setBusy(true);
       try {
         const spreadsheet = await findOrCreateCodeSpreadsheet();
-        const metadata = await getSpreadsheetMetadata(spreadsheet.id);
+        let metadata = await getSpreadsheetMetadata(spreadsheet.id);
         const existingTitles = new Set((metadata.sheets || []).map((sheet) => sheet.properties.title));
         const sheetTitlesByCourseId = new Map();
+        const assignedTitles = new Set();
         const requests = [];
 
         for (const courseId of state.rostersByCourseId.keys()) {
           const course = state.courses.find((item) => item.id === courseId) || { name: courseId };
-          const title = makeSheetTitle(course.name || courseId, existingTitles);
+          const title = makeUniqueCourseSheetTitle(course, assignedTitles);
           sheetTitlesByCourseId.set(courseId, title);
           const currentSheet = (metadata.sheets || []).find((sheet) => sheet.properties.title === title);
           if (!currentSheet) {
@@ -1028,7 +1052,10 @@
             method: "POST",
             body: JSON.stringify({ requests })
           });
+          metadata = await getSpreadsheetMetadata(spreadsheet.id);
         }
+
+        await removeMovedStudentsFromOtherClassSheets(spreadsheet.id, metadata, new Set(sheetTitlesByCourseId.values()));
 
         for (const [courseId, roster] of state.rostersByCourseId.entries()) {
           const title = sheetTitlesByCourseId.get(courseId);
@@ -1051,12 +1078,49 @@
 
         await deleteDefaultSheetIfEmpty(spreadsheet.id);
         renderRosters();
-        setMessage(`Codes written to "${spreadsheet.name}". Spreadsheet ID: ${spreadsheet.id}`, "success");
+        setMessage(`Codes synced to "${spreadsheet.name}". Existing codes were preserved and moved students were updated. Spreadsheet ID: ${spreadsheet.id}`, "success");
       } catch (error) {
         setMessage(`Could not write codes to Sheets: ${error.message}`, "error");
       } finally {
         setBusy(false);
       }
+    }
+
+    async function removeMovedStudentsFromOtherClassSheets(spreadsheetId, metadata, currentClassTitles) {
+      const currentEmails = new Set();
+      state.rostersByCourseId.forEach((roster) => {
+        roster.forEach((student) => {
+          if (student.email) currentEmails.add(student.email);
+        });
+      });
+
+      if (!currentEmails.size) return;
+
+      for (const sheet of metadata.sheets || []) {
+        const title = sheet.properties.title;
+        if (currentClassTitles.has(title)) continue;
+        if (!(await isManagedCodeSheet(spreadsheetId, title))) continue;
+
+        const rows = await readSheetValues(spreadsheetId, `${quoteSheetName(title)}!A2:D`);
+        const keptRows = rows.filter((row) => !currentEmails.has((row[0] || "").toLowerCase()));
+        if (keptRows.length === rows.length) continue;
+
+        const values = [CODE_HEADERS, ...keptRows];
+        await apiRequest(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`${quoteSheetName(title)}!A:D`)}:clear`, {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        await apiRequest(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`${quoteSheetName(title)}!A1`)}?valueInputOption=RAW`, {
+          method: "PUT",
+          body: JSON.stringify({ range: `${quoteSheetName(title)}!A1`, majorDimension: "ROWS", values })
+        });
+      }
+    }
+
+    async function isManagedCodeSheet(spreadsheetId, title) {
+      const values = await readSheetValues(spreadsheetId, `${quoteSheetName(title)}!A1:D1`);
+      const header = values[0] || [];
+      return CODE_HEADERS.every((expected, index) => header[index] === expected);
     }
 
     async function findOrCreateCodeSpreadsheet() {
@@ -1125,12 +1189,27 @@
       });
     }
 
-    function makeSheetTitle(rawTitle, existingTitles) {
-      const clean = rawTitle.replace(/[\\/?*[\]:]/g, " ").replace(/\s+/g, " ").trim().slice(0, 90) || "Class";
-      if (!existingTitles.has(clean)) return clean;
+    function makeUniqueCourseSheetTitle(course, assignedTitles) {
+      const baseTitle = makeSheetTitle(course.name || course.id || "Class");
+      if (!assignedTitles.has(baseTitle)) {
+        assignedTitles.add(baseTitle);
+        return baseTitle;
+      }
+
+      const detailTitle = makeSheetTitle(`${course.name || "Class"} ${course.section || course.id || ""}`);
+      let title = detailTitle;
       let index = 2;
-      while (existingTitles.has(`${clean.slice(0, 85)} ${index}`)) index += 1;
-      return `${clean.slice(0, 85)} ${index}`;
+      while (assignedTitles.has(title)) {
+        title = makeSheetTitle(`${detailTitle} ${index}`);
+        index += 1;
+      }
+      assignedTitles.add(title);
+      return title;
+    }
+
+    function makeSheetTitle(rawTitle) {
+      const clean = rawTitle.replace(/[\\/?*[\]:]/g, " ").replace(/\s+/g, " ").trim().slice(0, 90) || "Class";
+      return clean;
     }
 
     function quoteSheetName(title) {
@@ -1213,10 +1292,18 @@
         heading.className = "roster-heading";
         const title = document.createElement("h3");
         title.textContent = course.name || course.id;
+        const actions = document.createElement("div");
+        actions.className = "button-row";
         const count = document.createElement("span");
         count.className = "student-count";
         count.textContent = `${students.length} student${students.length === 1 ? "" : "s"}`;
-        heading.append(title, count);
+        const unload = document.createElement("button");
+        unload.className = "secondary";
+        unload.type = "button";
+        unload.textContent = "Unload";
+        unload.addEventListener("click", () => unloadImportedClasslist(courseId));
+        actions.append(count, unload);
+        heading.append(title, actions);
 
         const list = document.createElement("div");
         list.className = "student-list";
@@ -1339,6 +1426,7 @@
     });
     els.loadClasses.addEventListener("click", loadCourses);
     els.importSelected.addEventListener("click", importSelectedClasslists);
+    els.unloadImported.addEventListener("click", unloadImportedClasslists);
     els.writeSheets.addEventListener("click", writeCodesToSheets);
     els.studentLookup.addEventListener("click", studentLookupAndLogin);
     els.selectAllClasses.addEventListener("change", () => {
