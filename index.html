@@ -687,6 +687,14 @@
       els.message.className = `message ${type}`.trim();
     }
 
+    function withTimeout(promise, timeoutMs, message) {
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+      });
+      return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId));
+    }
+
     function setBusy(isBusy) {
       state.busy = isBusy;
       els.classBusy.hidden = !isBusy;
@@ -1256,13 +1264,24 @@
         setMessage("Searching class tabs for your student code...");
         const match = await findStudentCode(spreadsheet.id, state.account.email);
         if (!match) throw new Error("No matching student row found for the signed-in Google email.");
+        if (!match.code) throw new Error(`A matching row was found in "${match.className}", but the code cell is empty.`);
 
-        const credential = await signInAnonymously(state.firebaseAuth);
+        setMessage(`Code found in "${match.className}". Starting anonymous Firebase login...`);
+        const credential = await withTimeout(
+          signInAnonymously(state.firebaseAuth),
+          12000,
+          "Firebase anonymous sign-in timed out. Check that Anonymous Auth is enabled for this Firebase project."
+        );
         state.firebaseUser = credential.user;
-        await set(ref(state.database, `studentCodes/${credential.user.uid}`), {
-          code: match.code,
-          updatedAt: serverTimestamp()
-        });
+        setMessage("Anonymous Firebase login complete. Saving code...");
+        await withTimeout(
+          set(ref(state.database, `studentCodes/${credential.user.uid}`), {
+            code: match.code,
+            updatedAt: serverTimestamp()
+          }),
+          12000,
+          "Realtime Database write timed out. Check the database URL and Realtime Database rules."
+        );
 
         renderStudentResult(match, credential.user.uid);
         setMessage("Anonymous Firebase login complete. Only the random code was written to Realtime Database.", "success");
@@ -1275,7 +1294,7 @@
 
     async function findStudentCode(spreadsheetId, email) {
       const metadata = await getSpreadsheetMetadata(spreadsheetId);
-      const targetEmail = email.toLowerCase();
+      const targetEmail = email.trim().toLowerCase();
       const titles = (metadata.sheets || []).map((sheet) => sheet.properties.title);
       if (!titles.length) return null;
 
@@ -1291,15 +1310,16 @@
         }
         setMessage(`Read ${values.length} row${values.length === 1 ? "" : "s"} from "${title}". Checking email...`);
         for (const row of values) {
-          if ((row[0] || "").toLowerCase() === targetEmail) {
+          if ((row[0] || "").trim().toLowerCase() === targetEmail) {
             return {
               className: title,
               firstName: row[1] || "",
               lastName: row[2] || "",
-              code: row[3] || ""
+              code: (row[3] || "").trim()
             };
           }
         }
+        setMessage(`No match in "${title}".`);
       }
       return null;
     }
